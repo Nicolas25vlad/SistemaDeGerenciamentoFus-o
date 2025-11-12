@@ -1,7 +1,7 @@
 -- fusion_client.lua
 
 local Config = {
-    SERVER_IP = "192.168.15.176",  -- ALTERE PARA SEU IP
+    SERVER_IP = "",  -- ALTERE PARA SEU IP
     SERVER_PORT = 8765,
     UPDATE_INTERVAL = 2,  -- segundos
     WEBSOCKET_URL = nil  -- Será preenchido automaticamente
