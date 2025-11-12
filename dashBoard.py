@@ -1,367 +1,425 @@
-# reactor_dashboard.py
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from matplotlib.gridspec import GridSpec
-import numpy as np
-from datetime import datetime, timedelta
+# fusion_monitor_advanced.py
+import tkinter as tk
+from tkinter import ttk
+import json
+import threading
 import time
+from datetime import datetime
+import os
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.animation as animation
+from matplotlib import style
 
-class ReactorDashboard:
-    def __init__(self, analyzer):
-        self.analyzer = analyzer
-        self.setup_plots()
+# Configurar estilo dos gráficos
+style.use('dark_background')
+plt.rcParams['axes.facecolor'] = '#1e1e1e'
+plt.rcParams['figure.facecolor'] = '#2d2d2d'
+
+class FusionMonitor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("🏭 Fusion Reactor Monitor - Advanced")
+        self.root.geometry("1200x800")
+        self.root.configure(bg='#1e1e1e')
         
-        # Dados históricos para tendências
+        # Dados históricos para gráficos
         self.time_data = []
-        self.temperature_data = []
-        self.power_data = []
-        self.rpm_data = []
-        self.fuel_data = []
-        self.efficiency_data = []
+        self.plasma_temp_data = []
+        self.case_temp_data = []
+        self.injection_rate_data = []
+        self.energy_production_data = []
+        self.max_history = 100  # Pontos máximos no gráfico
         
-    def setup_plots(self):
-        """Configura o dashboard com múltiplos gráficos"""
-        plt.rcParams['figure.figsize'] = [15, 10]
-        plt.rcParams['font.size'] = 8
+        # Configurar interface
+        self.setup_ui()
         
-        self.fig = plt.figure('Fusion Reactor Dashboard', facecolor='#1e1e1e')
-        self.fig.suptitle('REATOR DE FUSÃO - MONITORAMENTO EM TEMPO REAL', 
-                         color='white', fontsize=16, fontweight='bold')
+        # Iniciar thread de atualização
+        self.running = True
+        self.update_thread = threading.Thread(target=self.update_loop, daemon=True)
+        self.update_thread.start()
         
-        # Layout do dashboard
-        gs = GridSpec(3, 3, figure=self.fig)
+    def setup_ui(self):
+        # Configurar estilo
+        self.setup_styles()
         
-        # Gráficos principais
-        self.temp_ax = self.fig.add_subplot(gs[0, 0])
-        self.power_ax = self.fig.add_subplot(gs[0, 1])
-        self.rpm_ax = self.fig.add_subplot(gs[0, 2])
-        self.fuel_ax = self.fig.add_subplot(gs[1, 0])
-        self.efficiency_ax = self.fig.add_subplot(gs[1, 1])
-        self.alerts_ax = self.fig.add_subplot(gs[1, 2])
-        self.trend_ax = self.fig.add_subplot(gs[2, :])
+        # Frame principal
+        main_frame = ttk.Frame(self.root, padding="15", style='Dark.TFrame')
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        self.style_plots()
+        # Configurar grid weights
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(1, weight=1)
         
-    def style_plots(self):
-        """Estiliza todos os gráficos"""
-        axes = [self.temp_ax, self.power_ax, self.rpm_ax, 
-                self.fuel_ax, self.efficiency_ax, self.alerts_ax, self.trend_ax]
+        # Header
+        self.setup_header(main_frame)
         
-        for ax in axes:
-            ax.set_facecolor('#2b2b2b')
-            ax.tick_params(colors='white')
-            ax.spines['bottom'].set_color('white')
-            ax.spines['top'].set_color('white') 
-            ax.spines['right'].set_color('white')
-            ax.spines['left'].set_color('white')
-            ax.title.set_color('white')
-            ax.xaxis.label.set_color('white')
-            ax.yaxis.label.set_color('white')
-    
-    def update_dashboard(self, frame):
-        """Atualiza todos os gráficos em tempo real"""
-        analysis = self.analyzer.get_real_time_analysis()
+        # Painel de Métricas em Tempo Real
+        self.setup_metrics_panel(main_frame)
         
-        if analysis['status'] == 'offline':
-            return
+        # Painel de Gráficos
+        self.setup_graphs_panel(main_frame)
         
-        current_time = datetime.now()
+    def setup_styles(self):
+        """Configura os estilos visuais"""
+        style = ttk.Style()
+        style.theme_use('clam')
         
-        # Atualiza dados históricos (mantém últimas 100 amostras)
-        self.time_data.append(current_time)
-        self.temperature_data.append(analysis['reactor']['temperatures']['plasma']['megakelvin'])
-        self.power_data.append(analysis['turbine']['power']['power_watts'] / 1000)  # kW
-        self.rpm_data.append(analysis['turbine']['rotation']['rpm'])
-        self.fuel_data.append(analysis['reactor']['deuterium']['percentage'])
+        # Configurar cores
+        style.configure('Dark.TFrame', background='#1e1e1e')
+        style.configure('Dark.TLabelframe', background='#2d2d2d', foreground='white')
+        style.configure('Dark.TLabelframe.Label', background='#2d2d2d', foreground='white')
+        style.configure('Title.TLabel', background='#1e1e1e', foreground='#00ff88', font=('Arial', 18, 'bold'))
+        style.configure('Subtitle.TLabel', background='#1e1e1e', foreground='#cccccc', font=('Arial', 12))
+        style.configure('Metric.TLabel', background='#2d2d2d', foreground='white', font=('Arial', 10))
+        style.configure('Value.TLabel', background='#2d2d2d', foreground='#00ff88', font=('Arial', 12, 'bold'))
+        style.configure('Unit.TLabel', background='#2d2d2d', foreground='#888888', font=('Arial', 9))
         
-        if analysis['efficiency']:
-            self.efficiency_data.append(analysis['efficiency'].get('overall_efficiency', 0))
+    def setup_header(self, parent):
+        """Configura o cabeçalho"""
+        header_frame = ttk.Frame(parent, style='Dark.TFrame')
+        header_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
         
-        # Mantém apenas últimos 5 minutos de dados
-        max_points = 300  # 5 minutos a 1Hz
-        if len(self.time_data) > max_points:
-            self.time_data = self.time_data[-max_points:]
-            self.temperature_data = self.temperature_data[-max_points:]
-            self.power_data = self.power_data[-max_points:]
-            self.rpm_data = self.rpm_data[-max_points:]
-            self.fuel_data = self.fuel_data[-max_points:]
-            self.efficiency_data = self.efficiency_data[-max_points:]
+        # Título principal
+        title_label = ttk.Label(header_frame, text="🏭 FUSION REACTOR MONITOR", style='Title.TLabel')
+        title_label.grid(row=0, column=0, sticky=tk.W)
         
-        # Limpa todos os gráficos
-        for ax in [self.temp_ax, self.power_ax, self.rpm_ax, 
-                  self.fuel_ax, self.efficiency_ax, self.alerts_ax, self.trend_ax]:
-            ax.clear()
-            self.style_single_plot(ax)
+        # Subtítulo
+        subtitle_label = ttk.Label(header_frame, text="Monitoramento em Tempo Real - Minecraft Fusion Reactor", 
+                                 style='Subtitle.TLabel')
+        subtitle_label.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
         
-        # Atualiza cada gráfico individualmente
-        self.update_temperature_plot(analysis)
-        self.update_power_plot(analysis)
-        self.update_rpm_plot(analysis)
-        self.update_fuel_plot(analysis)
-        self.update_efficiency_plot(analysis)
-        self.update_alerts_panel(analysis)
-        self.update_trend_plot()
+        # Status e timestamp
+        self.status_label = ttk.Label(header_frame, text="● Status: Aguardando dados...", 
+                                    style='Subtitle.TLabel', foreground='orange')
+        self.status_label.grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
         
-        plt.tight_layout()
-    
-    def style_single_plot(self, ax):
-        """Estiliza um gráfico individual"""
-        ax.set_facecolor('#2b2b2b')
-        ax.tick_params(colors='white')
-        for spine in ax.spines.values():
-            spine.set_color('white')
-        ax.title.set_color('white')
-        ax.xaxis.label.set_color('white')
-        ax.yaxis.label.set_color('white')
-    
-    def update_temperature_plot(self, analysis):
-        """Gráfico de temperatura do plasma"""
-        reactor = analysis['reactor']
-        temp_data = reactor['temperatures']['plasma']
+        self.timestamp_label = ttk.Label(header_frame, text="Última atualização: --", 
+                                       style='Subtitle.TLabel', foreground='#888888')
+        self.timestamp_label.grid(row=3, column=0, sticky=tk.W, pady=(2, 0))
         
-        # Gráfico de gauge para temperatura
-        current_temp = temp_data['megakelvin']
-        max_safe_temp = 150  # MK
+    def setup_metrics_panel(self, parent):
+        """Configura o painel de métricas em tempo real"""
+        metrics_frame = ttk.Frame(parent, style='Dark.TFrame')
+        metrics_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
         
-        self.temp_ax.set_xlim(0, 1)
-        self.temp_ax.set_ylim(0, 1)
+        # Frame do Reator
+        reactor_frame = ttk.LabelFrame(metrics_frame, text="🔬 REATOR DE FUSÃO", padding="15", style='Dark.TLabelframe')
+        reactor_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        reactor_frame.columnconfigure(1, weight=1)
         
-        # Cores baseadas na temperatura
-        if current_temp > 120:
-            color = 'red'
-        elif current_temp > 80:
-            color = 'orange'
-        else:
-            color = 'green'
+        # Dados do Reator (apenas temperaturas e taxa de injeção)
+        self.setup_reactor_widgets(reactor_frame)
         
-        # Display estilo painel industrial
-        self.temp_ax.text(0.5, 0.7, f'{current_temp:.1f}', ha='center', va='center', 
-                         fontsize=24, color=color, fontweight='bold')
-        self.temp_ax.text(0.5, 0.5, 'MEGAKELVIN', ha='center', va='center', 
-                         fontsize=10, color='white')
-        self.temp_ax.text(0.5, 0.3, f"{temp_data['celsius']:,.0f} °C", 
-                         ha='center', va='center', fontsize=12, color='lightblue')
+        # Frame da Turbina
+        turbine_frame = ttk.LabelFrame(metrics_frame, text="⚡ TURBINA", padding="15", style='Dark.TLabelframe')
+        turbine_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        turbine_frame.columnconfigure(1, weight=1)
         
-        # Barra de progresso
-        progress = min(current_temp / max_safe_temp, 1.0)
-        self.temp_ax.barh(0.1, progress, height=0.1, color=color, alpha=0.7)
-        self.temp_ax.barh(0.1, 1-progress, height=0.1, left=progress, color='gray', alpha=0.3)
+        # Dados da Turbina
+        self.setup_turbine_widgets(turbine_frame)
         
-        self.temp_ax.set_title('TEMPERATURA DO PLASMA', fontweight='bold', pad=10)
-        self.temp_ax.set_xticks([])
-        self.temp_ax.set_yticks([])
-    
-    def update_power_plot(self, analysis):
-        """Gráfico de produção de energia"""
-        turbine = analysis['turbine']
-        power_data = turbine['power']
+        metrics_frame.rowconfigure(0, weight=1)
+        metrics_frame.rowconfigure(1, weight=1)
         
-        current_power = power_data['power_watts'] / 1000  # kW
-        max_power = power_data['max_power_watts'] / 1000
+    def setup_reactor_widgets(self, parent):
+        """Configura os widgets para dados do reator"""
+        row = 0
         
-        # Gráfico de pizza para carga atual
-        labels = ['Produzindo', 'Capacidade Disponível']
-        sizes = [current_power, max(0, max_power - current_power)]
-        colors = ['#ff6b6b', '#4ecdc4']
+        # Temperatura do Plasma
+        ttk.Label(parent, text="Temperatura do Plasma:", style='Metric.TLabel').grid(row=row, column=0, sticky=tk.W, pady=8)
+        self.plasma_temp_var = tk.StringVar(value="--")
+        ttk.Label(parent, textvariable=self.plasma_temp_var, style='Value.TLabel').grid(row=row, column=1, sticky=tk.W, pady=8)
+        ttk.Label(parent, text="°C", style='Unit.TLabel').grid(row=row, column=2, sticky=tk.W, pady=8, padx=(5, 0))
+        row += 1
         
-        wedges, texts, autotexts = self.power_ax.pie(
-            sizes, labels=labels, colors=colors, autopct='%1.1f%%',
-            startangle=90, textprops={'color': 'white'}
-        )
+        # Temperatura do Casco
+        ttk.Label(parent, text="Temperatura do Casco:", style='Metric.TLabel').grid(row=row, column=0, sticky=tk.W, pady=8)
+        self.case_temp_var = tk.StringVar(value="--")
+        ttk.Label(parent, textvariable=self.case_temp_var, style='Value.TLabel').grid(row=row, column=1, sticky=tk.W, pady=8)
+        ttk.Label(parent, text="°C", style='Unit.TLabel').grid(row=row, column=2, sticky=tk.W, pady=8, padx=(5, 0))
+        row += 1
         
-        for autotext in autotexts:
-            autotext.set_color('white')
-            autotext.set_fontweight('bold')
+        # Taxa de Injeção
+        ttk.Label(parent, text="Taxa de Injeção:", style='Metric.TLabel').grid(row=row, column=0, sticky=tk.W, pady=8)
+        self.injection_var = tk.StringVar(value="--")
+        ttk.Label(parent, textvariable=self.injection_var, style='Value.TLabel').grid(row=row, column=1, sticky=tk.W, pady=8)
+        ttk.Label(parent, text="mB/t", style='Unit.TLabel').grid(row=row, column=2, sticky=tk.W, pady=8, padx=(5, 0))
+        row += 1
         
-        self.power_ax.set_title(f'PRODUÇÃO DE ENERGIA\n{current_power:.0f} kW / {max_power:.0f} kW', 
-                              fontweight='bold', pad=10)
-    
-    def update_rpm_plot(self, analysis):
-        """Gráfico de rotação da turbina"""
-        turbine = analysis['turbine']
-        rotation_data = turbine['rotation']
+        # Barra de status do reator
+        self.reactor_status_var = tk.StringVar(value="Reator: Aguardando dados")
+        ttk.Label(parent, textvariable=self.reactor_status_var, style='Metric.TLabel', 
+                 foreground='orange').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(15, 0))
+        row += 1
         
-        current_rpm = rotation_data['rpm']
-        max_safe_rpm = 3600
+    def setup_turbine_widgets(self, parent):
+        """Configura os widgets para dados da turbina"""
+        row = 0
         
-        # Gráfico de velocímetro
-        theta = np.linspace(0, np.pi, 100)
-        r = np.ones(100)
+        # Produção de Energia
+        ttk.Label(parent, text="Produção de Energia:", style='Metric.TLabel').grid(row=row, column=0, sticky=tk.W, pady=8)
+        self.production_var = tk.StringVar(value="--")
+        ttk.Label(parent, textvariable=self.production_var, style='Value.TLabel').grid(row=row, column=1, sticky=tk.W, pady=8)
+        ttk.Label(parent, text="J/t", style='Unit.TLabel').grid(row=row, column=2, sticky=tk.W, pady=8, padx=(5, 0))
+        row += 1
         
-        self.rpm_ax.plot(theta, r, color='white', linewidth=2)
+        # Produção Máxima
+        ttk.Label(parent, text="Capacidade Máxima:", style='Metric.TLabel').grid(row=row, column=0, sticky=tk.W, pady=8)
+        self.max_production_var = tk.StringVar(value="--")
+        ttk.Label(parent, textvariable=self.max_production_var, style='Value.TLabel').grid(row=row, column=1, sticky=tk.W, pady=8)
+        ttk.Label(parent, text="J/t", style='Unit.TLabel').grid(row=row, column=2, sticky=tk.W, pady=8, padx=(5, 0))
+        row += 1
         
-        # Ponteiro
-        rpm_ratio = min(current_rpm / max_safe_rpm, 1.0)
-        pointer_angle = rpm_ratio * np.pi
-        self.rpm_ax.plot([pointer_angle, pointer_angle], [0, 0.9], 
-                        color='yellow', linewidth=3)
+        # Eficiência
+        ttk.Label(parent, text="Eficiência:", style='Metric.TLabel').grid(row=row, column=0, sticky=tk.W, pady=8)
+        self.efficiency_var = tk.StringVar(value="--")
+        ttk.Label(parent, textvariable=self.efficiency_var, style='Value.TLabel').grid(row=row, column=1, sticky=tk.W, pady=8)
+        ttk.Label(parent, text="%", style='Unit.TLabel').grid(row=row, column=2, sticky=tk.W, pady=8, padx=(5, 0))
+        row += 1
         
-        # Zonas de cores
-        safe_zone = np.linspace(0, 0.7 * np.pi, 50)
-        warning_zone = np.linspace(0.7 * np.pi, 0.9 * np.pi, 20)
-        danger_zone = np.linspace(0.9 * np.pi, np.pi, 30)
+        # Vazão de Steam
+        ttk.Label(parent, text="Vazão de Steam:", style='Metric.TLabel').grid(row=row, column=0, sticky=tk.W, pady=8)
+        self.flow_var = tk.StringVar(value="--")
+        ttk.Label(parent, textvariable=self.flow_var, style='Value.TLabel').grid(row=row, column=1, sticky=tk.W, pady=8)
+        ttk.Label(parent, text="mB/t", style='Unit.TLabel').grid(row=row, column=2, sticky=tk.W, pady=8, padx=(5, 0))
+        row += 1
         
-        self.rpm_ax.fill_between(safe_zone, 0, 1, color='green', alpha=0.3)
-        self.rpm_ax.fill_between(warning_zone, 0, 1, color='orange', alpha=0.3)
-        self.rpm_ax.fill_between(danger_zone, 0, 1, color='red', alpha=0.3)
+        # Barra de status da turbina
+        self.turbine_status_var = tk.StringVar(value="Turbina: Aguardando dados")
+        ttk.Label(parent, textvariable=self.turbine_status_var, style='Metric.TLabel', 
+                 foreground='orange').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(15, 0))
+        row += 1
         
-        self.rpm_ax.text(np.pi/2, 0.5, f'{current_rpm:.0f}\nRPM', 
-                        ha='center', va='center', fontsize=16, 
-                        color='white', fontweight='bold')
+    def setup_graphs_panel(self, parent):
+        """Configura o painel de gráficos"""
+        graphs_frame = ttk.Frame(parent, style='Dark.TFrame')
+        graphs_frame.grid(row=1, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
+        graphs_frame.columnconfigure(0, weight=1)
+        graphs_frame.rowconfigure(0, weight=1)
+        graphs_frame.rowconfigure(1, weight=1)
         
-        self.rpm_ax.set_title('ROTAÇÃO DA TURBINA', fontweight='bold', pad=10)
-        self.rpm_ax.set_xlim(0, np.pi)
-        self.rpm_ax.set_ylim(0, 1)
-        self.rpm_ax.set_xticks([])
-        self.rpm_ax.set_yticks([])
-    
-    def update_fuel_plot(self, analysis):
-        """Gráfico de nível de combustível"""
-        reactor = analysis['reactor']
-        fuel_data = reactor['deuterium']
+        # Gráfico de Temperaturas
+        self.setup_temperature_graph(graphs_frame)
         
-        current_fuel = fuel_data['percentage']
+        # Gráfico de Energia
+        self.setup_energy_graph(graphs_frame)
         
-        # Gráfico de barras vertical estilo tanque
-        self.fuel_ax.bar(0, current_fuel, width=0.6, color='cyan', alpha=0.7, label='Atual')
-        self.fuel_ax.bar(0, 100-current_fuel, width=0.6, bottom=current_fuel, 
-                        color='gray', alpha=0.3, label='Vazio')
+    def setup_temperature_graph(self, parent):
+        """Configura o gráfico de temperaturas"""
+        temp_frame = ttk.LabelFrame(parent, text="📊 TEMPERATURAS DO REATOR", padding="10", style='Dark.TLabelframe')
+        temp_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 5))
+        temp_frame.columnconfigure(0, weight=1)
+        temp_frame.rowconfigure(0, weight=1)
         
-        # Linhas de referência
-        for level in [20, 50, 80]:
-            self.fuel_ax.axhline(level, color='white', linestyle='--', alpha=0.5)
-            self.fuel_ax.text(0.3, level, f'{level}%', va='center', color='white')
+        # Criar figura do matplotlib
+        self.temp_fig, self.temp_ax = plt.subplots(figsize=(6, 3), facecolor='#2d2d2d')
+        self.temp_ax.set_facecolor('#1e1e1e')
         
-        self.fuel_ax.text(0, current_fuel + 5, f'{current_fuel:.1f}%', 
-                         ha='center', color='white', fontweight='bold', fontsize=12)
+        # Configurar gráfico
+        self.temp_ax.set_title('Temperaturas ao Longo do Tempo', color='white', pad=10)
+        self.temp_ax.set_ylabel('Temperatura (°C)', color='white')
+        self.temp_ax.set_xlabel('Tempo (segundos)', color='white')
+        self.temp_ax.tick_params(colors='white')
+        self.temp_ax.grid(True, alpha=0.3)
         
-        self.fuel_ax.set_ylim(0, 100)
-        self.fuel_ax.set_xlim(-0.5, 0.5)
-        self.fuel_ax.set_xticks([])
-        self.fuel_ax.set_ylabel('Nível de Combustível (%)', color='white')
-        self.fuel_ax.set_title('RESERVA DE DEUTÉRIO', fontweight='bold', pad=10)
-    
-    def update_efficiency_plot(self, analysis):
-        """Gráfico de eficiência do sistema"""
-        efficiency_data = analysis['efficiency']
+        # Inicializar linhas
+        self.plasma_line, = self.temp_ax.plot([], [], label='Plasma', color='#ff4444', linewidth=2)
+        self.case_line, = self.temp_ax.plot([], [], label='Casco', color='#44aaff', linewidth=2)
+        self.temp_ax.legend(facecolor='#2d2d2d', edgecolor='#444444', labelcolor='white')
         
-        metrics = []
-        values = []
-        colors = []
+        # Embed no tkinter
+        self.temp_canvas = FigureCanvasTkAgg(self.temp_fig, temp_frame)
+        self.temp_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        if efficiency_data:
-            if 'thermal_efficiency' in efficiency_data:
-                metrics.append('Térmica')
-                values.append(efficiency_data['thermal_efficiency'])
-                colors.append('#ff9ff3')
+    def setup_energy_graph(self, parent):
+        """Configura o gráfico de energia"""
+        energy_frame = ttk.LabelFrame(parent, text="⚡ PRODUÇÃO DE ENERGIA", padding="10", style='Dark.TLabelframe')
+        energy_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(5, 0))
+        energy_frame.columnconfigure(0, weight=1)
+        energy_frame.rowconfigure(0, weight=1)
+        
+        # Criar figura do matplotlib
+        self.energy_fig, self.energy_ax = plt.subplots(figsize=(6, 3), facecolor='#2d2d2d')
+        self.energy_ax.set_facecolor('#1e1e1e')
+        
+        # Configurar gráfico
+        self.energy_ax.set_title('Produção de Energia da Turbina', color='white', pad=10)
+        self.energy_ax.set_ylabel('Energia (J/t)', color='white')
+        self.energy_ax.set_xlabel('Tempo (segundos)', color='white')
+        self.energy_ax.tick_params(colors='white')
+        self.energy_ax.grid(True, alpha=0.3)
+        
+        # Inicializar linha
+        self.energy_line, = self.energy_ax.plot([], [], label='Produção', color='#00ff88', linewidth=2)
+        self.energy_ax.legend(facecolor='#2d2d2d', edgecolor='#444444', labelcolor='white')
+        
+        # Embed no tkinter
+        self.energy_canvas = FigureCanvasTkAgg(self.energy_fig, energy_frame)
+        self.energy_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+    def update_loop(self):
+        """Loop principal de atualização dos dados"""
+        start_time = time.time()
+        
+        while self.running:
+            try:
+                current_time = time.time() - start_time
+                
+                if os.path.exists("fusion_data.json"):
+                    with open("fusion_data.json", 'r') as f:
+                        new_data = json.load(f)
+                    
+                    # Atualiza interface na thread principal
+                    self.root.after(0, self.update_interface, new_data, current_time)
+                
+                time.sleep(0.5)  # Atualiza a cada 0.5 segundos
+                
+            except Exception as e:
+                print(f"Erro no loop de atualização: {e}")
+                time.sleep(2)
+                
+    def update_interface(self, data, current_time):
+        """Atualiza a interface com novos dados"""
+        # Atualizar header
+        self.timestamp_label.config(text=f"Última atualização: {datetime.now().strftime('%H:%M:%S')}")
+        status = data.get('status', 'aguardando_dados')
+        status_color = '#00ff88' if status == 'ativo' else 'orange'
+        self.status_label.config(text=f"● Status: {status.upper()}", foreground=status_color)
+        
+        # Dados do Reator
+        reactor_data = data.get('reactor', {})
+        self.update_reactor_display(reactor_data, current_time)
+        
+        # Dados da Turbina
+        turbine_data = data.get('turbine', {})
+        self.update_turbine_display(turbine_data, current_time)
+        
+        # Atualizar gráficos
+        self.update_graphs(current_time)
+        
+    def update_reactor_display(self, reactor_data, current_time):
+        """Atualiza a exibição dos dados do reator"""
+        if reactor_data:
+            # Temperaturas (já em Celsius)
+            plasma_temp = reactor_data.get('plasma_temperature', 0)
+            case_temp = reactor_data.get('case_temperature', 0)
             
-            if 'steam_cycle_efficiency' in efficiency_data:
-                metrics.append('Ciclo Vapor')
-                values.append(efficiency_data['steam_cycle_efficiency'])
-                colors.append('#74b9ff')
+            self.plasma_temp_var.set(f"{plasma_temp:,.0f}")
+            self.case_temp_var.set(f"{case_temp:,.0f}")
             
-            if 'overall_efficiency' in efficiency_data:
-                metrics.append('Global')
-                values.append(efficiency_data['overall_efficiency'])
-                colors.append('#00b894')
-        
-        if values:
-            bars = self.efficiency_ax.bar(metrics, values, color=colors, alpha=0.7)
+            # Taxa de injeção (mB/tick - mantém a unidade do Minecraft)
+            injection_rate = reactor_data.get('injection_rate', 0)
+            self.injection_var.set(f"{injection_rate:,.0f}")
             
-            # Adiciona valores nas barras
-            for bar, value in zip(bars, values):
-                height = bar.get_height()
-                self.efficiency_ax.text(bar.get_x() + bar.get_width()/2., height + 1,
-                                       f'{value:.1f}%', ha='center', va='bottom', 
-                                       color='white', fontweight='bold')
+            # Status do reator
+            if plasma_temp > 1e8:
+                status_text = "⚠️  ALERTA: Temperatura crítica!"
+                status_color = '#ff4444'
+            elif plasma_temp > 5e7:
+                status_text = "⚠️  AVISO: Temperatura alta"
+                status_color = 'orange'
+            else:
+                status_text = "✅ Reator operando normalmente"
+                status_color = '#00ff88'
             
-            self.efficiency_ax.set_ylim(0, 100)
-            self.efficiency_ax.set_ylabel('Eficiência (%)', color='white')
-        
-        self.efficiency_ax.set_title('EFICIÊNCIA DO SISTEMA', fontweight='bold', pad=10)
-    
-    def update_alerts_panel(self, analysis):
-        """Painel de alertas e status"""
-        self.alerts_ax.set_xlim(0, 1)
-        self.alerts_ax.set_ylim(0, 1)
-        
-        status_color = 'green' if analysis['status'] == 'NORMAL' else 'red'
-        
-        # Status principal
-        self.alerts_ax.text(0.5, 0.9, analysis['status'], ha='center', va='center',
-                          fontsize=16, color=status_color, fontweight='bold',
-                          bbox=dict(boxstyle="round,pad=0.3", facecolor=status_color, alpha=0.2))
-        
-        # Alertas
-        y_pos = 0.7
-        if analysis['anomalies']:
-            self.alerts_ax.text(0.1, y_pos, '🚨 ALERTAS ATIVOS:', 
-                              color='red', fontweight='bold', fontsize=10)
-            y_pos -= 0.1
+            self.reactor_status_var.set(status_text)
+            # Não é possível alterar cor do texto dinamicamente no ttk, então usamos foreground fixo
             
-            for alert in analysis['anomalies'][:3]:  # Mostra até 3 alertas
-                self.alerts_ax.text(0.1, y_pos, f'• {alert}', 
-                                  color='orange', fontsize=8, wrap=True)
-                y_pos -= 0.08
-        else:
-            self.alerts_ax.text(0.5, 0.5, '✅ TODOS OS SISTEMAS\n   OPERACIONAIS', 
-                              ha='center', va='center', color='green', fontweight='bold')
+            # Adicionar dados históricos
+            self.time_data.append(current_time)
+            self.plasma_temp_data.append(plasma_temp)
+            self.case_temp_data.append(case_temp)
+            self.injection_rate_data.append(injection_rate)
+            
+            # Limitar histórico
+            if len(self.time_data) > self.max_history:
+                self.time_data.pop(0)
+                self.plasma_temp_data.pop(0)
+                self.case_temp_data.pop(0)
+                self.injection_rate_data.pop(0)
         
-        # Métricas rápidas
-        reactor = analysis['reactor']
-        y_pos = 0.3
-        quick_metrics = [
-            f"Injeção: {reactor['injection']['kg_per_second']:.1f} kg/s",
-            f"Vapor: {reactor['steam_production']['kg_per_second']:.1f} kg/s",
-            f"Pressão: {reactor['steam_storage']['pressure_bar']:.1f} bar"
-        ]
+    def update_turbine_display(self, turbine_data, current_time):
+        """Atualiza a exibição dos dados da turbina"""
+        if turbine_data:
+            # Converter RF/t para J/t (1 RF = 10 J no contexto do mod)
+            production_rf = turbine_data.get('production_rate', 0)
+            max_production_rf = turbine_data.get('max_production', 0)
+            
+            production_j = production_rf * 10  # Conversão para Joules
+            max_production_j = max_production_rf * 10  # Conversão para Joules
+            
+            self.production_var.set(f"{production_j:,.0f}")
+            self.max_production_var.set(f"{max_production_j:,.0f}")
+            
+            # Eficiência
+            if max_production_j > 0:
+                efficiency = (production_j / max_production_j) * 100
+                self.efficiency_var.set(f"{efficiency:.1f}")
+            else:
+                self.efficiency_var.set("0.0")
+            
+            # Vazão (mB/tick - mantém unidade do Minecraft)
+            flow_rate = turbine_data.get('flow_rate', 0)
+            self.flow_var.set(f"{flow_rate:,.0f}")
+            
+            # Status da turbina
+            if efficiency >= 90:
+                status_text = "✅ Turbina em capacidade máxima"
+                status_color = '#00ff88'
+            elif efficiency >= 50:
+                status_text = "⚡ Turbina operando eficientemente"
+                status_color = '#44aaff'
+            else:
+                status_text = "⚠️  Turbina em baixa eficiência"
+                status_color = 'orange'
+            
+            self.turbine_status_var.set(status_text)
+            
+            # Adicionar dados históricos de energia
+            self.energy_production_data.append(production_j)
+            if len(self.energy_production_data) > self.max_history:
+                self.energy_production_data.pop(0)
         
-        for metric in quick_metrics:
-            self.alerts_ax.text(0.1, y_pos, metric, color='lightblue', fontsize=8)
-            y_pos -= 0.06
-        
-        self.alerts_ax.set_title('STATUS E ALERTAS', fontweight='bold', pad=10)
-        self.alerts_ax.set_xticks([])
-        self.alerts_ax.set_yticks([])
-    
-    def update_trend_plot(self):
-        """Gráfico de tendências temporais"""
-        if len(self.time_data) < 2:
-            return
-        
-        # Converte tempos para minutos relativos
-        time_deltas = [(t - self.time_data[0]).total_seconds() / 60 for t in self.time_data]
-        
-        # Plota múltiplas tendências
-        self.trend_ax.plot(time_deltas, self.temperature_data, 'r-', label='Temp (MK)', linewidth=2)
-        self.trend_ax.plot(time_deltas, [p/100 for p in self.power_data], 'y-', 
-                          label='Potência (kW/100)', linewidth=2)
-        self.trend_ax.plot(time_deltas, [r/50 for r in self.rpm_data], 'c-', 
-                          label='RPM/50', linewidth=2)
-        self.trend_ax.plot(time_deltas, self.fuel_data, 'g-', label='Combustível (%)', linewidth=2)
-        
-        self.trend_ax.set_xlabel('Tempo (minutos)', color='white')
-        self.trend_ax.set_ylabel('Valores Normalizados', color='white')
-        self.trend_ax.legend(loc='upper right', facecolor='#2b2b2b', edgecolor='white')
-        self.trend_ax.set_title('TENDÊNCIAS TEMPORAIS (Últimos 5min)', fontweight='bold', pad=10)
-        self.trend_ax.grid(True, alpha=0.3)
-    
-    def start_dashboard(self):
-        """Inicia o dashboard animado"""
-        print("Iniciando dashboard em tempo real...")
-        print("Feche a janela para parar")
-        
-        # Animação que atualiza a cada segundo
-        ani = animation.FuncAnimation(
-            self.fig, self.update_dashboard, interval=1000, cache_frame_data=False
-        )
-        
-        plt.show()
+    def update_graphs(self, current_time):
+        """Atualiza os gráficos"""
+        if len(self.time_data) > 0:
+            # Atualizar gráfico de temperaturas
+            self.plasma_line.set_data(self.time_data, self.plasma_temp_data)
+            self.case_line.set_data(self.time_data, self.case_temp_data)
+            
+            self.temp_ax.relim()
+            self.temp_ax.autoscale_view()
+            self.temp_canvas.draw()
+            
+            # Atualizar gráfico de energia
+            self.energy_line.set_data(self.time_data, self.energy_production_data)
+            
+            self.energy_ax.relim()
+            self.energy_ax.autoscale_view()
+            self.energy_canvas.draw()
+            
+    def on_closing(self):
+        """Executado quando a janela é fechada"""
+        self.running = False
+        self.root.destroy()
 
-# Uso completo
-if __name__ == "__main__":
-    from fusion_analyzer import ReactorDataProcessor
+def main():
+    root = tk.Tk()
+    app = FusionMonitor(root)
     
-    analyzer = ReactorDataProcessor()
-    dashboard = ReactorDashboard(analyzer)
-    dashboard.start_dashboard()
+    # Configurar fechamento seguro
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    
+    print("🚀 Fusion Monitor Avançado iniciado!")
+    print("📊 Monitorando fusion_data.json em tempo real...")
+    print("📈 Gráficos ativos - Interface dark mode")
+    print("-" * 50)
+    
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()

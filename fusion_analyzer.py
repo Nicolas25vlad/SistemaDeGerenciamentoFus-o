@@ -1,298 +1,164 @@
-# fusion_analyzer.py
-import requests
+# fusion_server.py
+import asyncio
+import websockets
+import json
 import time
 from datetime import datetime
-import numpy as np
-from collections import deque
-from dataclasses import dataclass
-from typing import Dict, Optional
+import os
 
-@dataclass
-class RealWorldConstants:
-    """Constantes para conversão para unidades reais"""
-    BUCKET_TO_LITERS = 1000.0
-    TICK_TO_SECONDS = 1/20.0
-    FE_TO_JOULES = 2.5
-    STEAM_DENSITY = 0.6  # kg/L (vapor saturado)
-    WATER_DENSITY = 1.0  # kg/L
-    RPM_BASE = 1800
-    CELSIUS_TO_KELVIN = 273.15
-
-class ReactorDataProcessor:
-    def __init__(self, base_url="http://localhost:8080"):
-        self.base_url = base_url
-        self.constants = RealWorldConstants()
-        self.data_history = deque(maxlen=600)  # 10 minutos de dados
+class FusionServer:
+    def __init__(self):
+        self.connected_clients = set()
+        self.reactor_data = {}
+        self.turbine_data = {}
+        self.json_file_path = "fusion_data.json"
+        
+        # Inicializa arquivo JSON
+        self.initialize_json_file()
     
-    def fetch_raw_data(self) -> Optional[Dict]:
-        """Busca dados brutos do Lua"""
+    def initialize_json_file(self):
+        """Inicializa o arquivo JSON com estrutura vazia"""
+        initial_data = {
+            "timestamp": datetime.now().isoformat(),
+            "reactor": {},
+            "turbine": {},
+            "status": "aguardando_dados"
+        }
+        with open(self.json_file_path, 'w') as f:
+            json.dump(initial_data, f, indent=2)
+    
+    async def update_json_file(self):
+        """Atualiza o arquivo JSON com os dados mais recentes"""
+        current_data = {
+            "timestamp": datetime.now().isoformat(),
+            "reactor": self.reactor_data.copy(),
+            "turbine": self.turbine_data.copy(),
+            "status": "ativo" if self.reactor_data or self.turbine_data else "aguardando_dados"
+        }
+        
+        # Remove timestamps internos para evitar duplicação
+        if "timestamp" in current_data["reactor"]:
+            del current_data["reactor"]["timestamp"]
+        if "timestamp" in current_data["turbine"]:
+            del current_data["turbine"]["timestamp"]
+        
         try:
-            response = requests.get(f"{self.base_url}/api/raw", timeout=2)
-            if response.status_code == 200:
-                return response.json()
+            with open(self.json_file_path, 'w') as f:
+                json.dump(current_data, f, indent=2)
+            print(f"📄 JSON atualizado: {len(self.reactor_data)} dados reator, {len(self.turbine_data)} dados turbina")
         except Exception as e:
-            print(f"Erro ao buscar dados: {e}")
-            return None
+            print(f"❌ Erro ao atualizar JSON: {e}")
     
-    def process_reactor_data(self, raw_reactor: Dict) -> Dict:
-        """Processa dados brutos do reator para unidades reais"""
-        processed = {
-            'timestamp': datetime.now(),
-            'status': 'online',
-            'raw_data': raw_reactor
-        }
+    async def handle_client(self, websocket):
+        """Manipula conexões de clientes ComputerCraft"""
+        client_ip = websocket.remote_address[0]
+        print(f"🎮 Cliente CC conectado: {client_ip}")
+        self.connected_clients.add(websocket)
         
-        # COMBUSTÍVEL (Deutério)
-        if raw_reactor.get('deuterium'):
-            deuterium = raw_reactor['deuterium']
-            capacity = raw_reactor.get('deuterium_capacity', 1)
+        try:
+            # Envia confirmação de conexão
+            await websocket.send(json.dumps({
+                "tipo": "conexao",
+                "mensagem": "Servidor Fusion conectado",
+                "timestamp": time.time()
+            }))
             
-            # Extrai amount do objeto deuterium (pode ser um dict ou objeto)
-            amount = deuterium.get('amount', 0) if isinstance(deuterium, dict) else getattr(deuterium, 'amount', 0)
-            
-            processed['deuterium'] = {
-                'amount_ml': amount,
-                'capacity_ml': capacity,
-                'amount_liters': (amount / 1000) * self.constants.BUCKET_TO_LITERS,
-                'capacity_liters': capacity / 1000 * self.constants.BUCKET_TO_LITERS,
-                'percentage': (amount / capacity * 100) if capacity > 0 else 0
-            }
-        
-        # TAXA DE INJEÇÃO (L/s)
-        injection_rate = raw_reactor.get('injection_rate', 0)
-        processed['injection'] = {
-            'mb_per_tick': injection_rate,
-            'liters_per_second': (injection_rate / 1000) * self.constants.BUCKET_TO_LITERS / self.constants.TICK_TO_SECONDS,
-            'kg_per_second': (injection_rate / 1000) * self.constants.WATER_DENSITY / self.constants.TICK_TO_SECONDS
-        }
-        
-        # TEMPERATURAS
-        plasma_temp = raw_reactor.get('plasma_temperature', 0)
-        max_plasma_temp = raw_reactor.get('max_plasma_temperature', 1)
-        
-        processed['temperatures'] = {
-            'plasma': {
-                'celsius': plasma_temp,
-                'kelvin': plasma_temp + self.constants.CELSIUS_TO_KELVIN,
-                'megakelvin': (plasma_temp + self.constants.CELSIUS_TO_KELVIN) / 1e6,
-                'percentage': (plasma_temp / max_plasma_temp * 100) if max_plasma_temp > 0 else 0
-            },
-            'case': {
-                'celsius': raw_reactor.get('case_temperature', 0),
-                'kelvin': raw_reactor.get('case_temperature', 0) + self.constants.CELSIUS_TO_KELVIN
-            }
-        }
-        
-        # ÁGUA
-        if raw_reactor.get('water'):
-            water = raw_reactor['water']
-            water_capacity = raw_reactor.get('water_capacity', 1)
-            water_amount = water.get('amount', 0) if isinstance(water, dict) else getattr(water, 'amount', 0)
-            
-            processed['water'] = {
-                'amount_liters': (water_amount / 1000) * self.constants.BUCKET_TO_LITERS,
-                'capacity_liters': water_capacity / 1000 * self.constants.BUCKET_TO_LITERS,
-                'percentage': (water_amount / water_capacity * 100) if water_capacity > 0 else 0
-            }
-        
-        # PRODUÇÃO DE VAPOR
-        production_rate = raw_reactor.get('production_rate', 0)
-        processed['steam_production'] = {
-            'mb_per_tick': production_rate,
-            'liters_per_second': (production_rate / 1000) * self.constants.BUCKET_TO_LITERS / self.constants.TICK_TO_SECONDS,
-            'kg_per_second': (production_rate / 1000) * self.constants.STEAM_DENSITY / self.constants.TICK_TO_SECONDS
-        }
-        
-        # VAPOR ARMAZENADO
-        if raw_reactor.get('steam'):
-            steam = raw_reactor['steam']
-            steam_capacity = raw_reactor.get('steam_capacity', 1)
-            steam_amount = steam.get('amount', 0) if isinstance(steam, dict) else getattr(steam, 'amount', 0)
-            
-            processed['steam_storage'] = {
-                'amount_liters': (steam_amount / 1000) * self.constants.BUCKET_TO_LITERS,
-                'capacity_liters': steam_capacity / 1000 * self.constants.BUCKET_TO_LITERS,
-                'percentage': (steam_amount / steam_capacity * 100) if steam_capacity > 0 else 0,
-                'pressure_bar': (steam_amount / steam_capacity * 50) if steam_capacity > 0 else 0
-            }
-        
-        # ENERGIA
-        energy = raw_reactor.get('energy', 0)
-        max_energy = raw_reactor.get('max_energy', 1)
-        
-        processed['energy'] = {
-            'stored_fe': energy,
-            'capacity_fe': max_energy,
-            'stored_joules': energy * self.constants.FE_TO_JOULES,
-            'capacity_joules': max_energy * self.constants.FE_TO_JOULES,
-            'percentage': (energy / max_energy * 100) if max_energy > 0 else 0
-        }
-        
-        return processed
+            # Processa mensagens do cliente
+            async for message in websocket:
+                await self.process_message(websocket, message)
+                
+        except websockets.exceptions.ConnectionClosed:
+            print(f"🔌 Cliente desconectado: {client_ip}")
+        finally:
+            self.connected_clients.remove(websocket)
     
-    def process_turbine_data(self, raw_turbine: Dict) -> Dict:
-        """Processa dados brutos da turbina para unidades reais"""
-        processed = {
-            'timestamp': datetime.now(),
-            'status': 'online'
-        }
-        
-        # ROTAÇÃO (RPM)
-        flow_rate = raw_turbine.get('flow_rate', 0)
-        max_flow_rate = raw_turbine.get('max_flow_rate', 1)
-        efficiency = flow_rate / max_flow_rate if max_flow_rate > 0 else 0
-        
-        processed['rotation'] = {
-            'flow_rate_mb': flow_rate,
-            'max_flow_rate_mb': max_flow_rate,
-            'efficiency': efficiency,
-            'rpm': efficiency * self.constants.RPM_BASE * 2,
-            'angular_velocity_rad_s': efficiency * self.constants.RPM_BASE * 2 * (2 * np.pi / 60)
-        }
-        
-        # PRODUÇÃO DE ENERGIA (Watts)
-        production = raw_turbine.get('production_rate', 0)
-        max_production = raw_turbine.get('max_production', 1)
-        
-        processed['power'] = {
-            'fe_per_tick': production,
-            'max_fe_per_tick': max_production,
-            'power_watts': (production * self.constants.FE_TO_JOULES) / self.constants.TICK_TO_SECONDS,
-            'max_power_watts': (max_production * self.constants.FE_TO_JOULES) / self.constants.TICK_TO_SECONDS,
-            'efficiency': production / max_production if max_production > 0 else 0
-        }
-        
-        # ENERGIA ARMAZENADA
-        energy = raw_turbine.get('energy', 0)
-        max_energy = raw_turbine.get('max_energy', 1)
-        
-        processed['energy_storage'] = {
-            'stored_joules': energy * self.constants.FE_TO_JOULES,
-            'capacity_joules': max_energy * self.constants.FE_TO_JOULES,
-            'percentage': (energy / max_energy * 100) if max_energy > 0 else 0
-        }
-        
-        # CONSUMO DE VAPOR
-        if raw_turbine.get('steam'):
-            steam = raw_turbine['steam']
-            steam_capacity = raw_turbine.get('steam_capacity', 1)
-            steam_amount = steam.get('amount', 0) if isinstance(steam, dict) else getattr(steam, 'amount', 0)
+    async def process_message(self, websocket, message):
+        """Processa mensagens recebidas do CC"""
+        try:
+            data = json.loads(message)
+            message_type = data.get("tipo")
             
-            steam_kg = (steam_amount / 1000) * self.constants.STEAM_DENSITY
-            power_w = processed['power']['power_watts']
-            
-            processed['steam_consumption'] = {
-                'amount_kg': steam_kg,
-                'capacity_kg': steam_capacity / 1000 * self.constants.STEAM_DENSITY,
-                'specific_consumption': power_w / steam_kg if steam_kg > 0 else 0,
-                'efficiency_rankine': min(100, (power_w / (steam_kg * 2500)) * 100) if steam_kg > 0 else 0
-            }
-        
-        return processed
-    
-    def calculate_efficiency_metrics(self, reactor_data: Dict, turbine_data: Dict) -> Dict:
-        """Calcula métricas de eficiência do sistema completo"""
-        metrics = {}
-        
-        # Eficiência térmica
-        if (reactor_data.get('deuterium') and turbine_data.get('power')):
-            deuterium_liters = reactor_data['deuterium']['amount_liters']
-            power_w = turbine_data['power']['power_watts']
-            
-            # Energia teórica do deutério (aproximação)
-            theoretical_energy = deuterium_liters * 8.6e10
-            metrics['thermal_efficiency'] = (power_w / theoretical_energy * 100) if theoretical_energy > 0 else 0
-        
-        # Eficiência do ciclo vapor
-        if (reactor_data.get('steam_production') and turbine_data.get('power')):
-            steam_kg_s = reactor_data['steam_production']['kg_per_second']
-            power_kw = turbine_data['power']['power_watts'] / 1000
-            
-            thermal_power = steam_kg_s * 2800  # kJ/kg
-            metrics['steam_cycle_efficiency'] = (power_kw / thermal_power * 100) if thermal_power > 0 else 0
-        
-        # Eficiência global
-        if metrics.get('thermal_efficiency') and metrics.get('steam_cycle_efficiency'):
-            metrics['overall_efficiency'] = (metrics['thermal_efficiency'] * metrics['steam_cycle_efficiency']) / 100
-        
-        return metrics
-    
-    def detect_anomalies(self, reactor_data: Dict, turbine_data: Dict) -> list:
-        """Detecta anomalias operacionais"""
-        anomalies = []
-        
-        # Limites operacionais
-        limits = {
-            'max_plasma_temp_k': 2e8,    # 200 milhões K
-            'max_case_temp_k': 1500,     # 1500 K
-            'max_rpm': 3600,             # 3600 RPM
-            'min_deuterium': 5,          # 5%
-            'temp_gradient': 1e8         # 100 milhões K
-        }
-        
-        # Verificações de segurança
-        plasma_temp = reactor_data['temperatures']['plasma']['kelvin']
-        if plasma_temp > limits['max_plasma_temp_k']:
-            anomalies.append(f"Temperatura do plasma crítica: {plasma_temp:.2e} K")
-        
-        case_temp = reactor_data['temperatures']['case']['kelvin']
-        if case_temp > limits['max_case_temp_k']:
-            anomalies.append(f"Temperatura do casco alta: {case_temp:.0f} K")
-        
-        rpm = turbine_data['rotation']['rpm']
-        if rpm > limits['max_rpm']:
-            anomalies.append(f"Rotação excessiva: {rpm:.0f} RPM")
-        
-        deuterium_pct = reactor_data['deuterium']['percentage']
-        if deuterium_pct < limits['min_deuterium']:
-            anomalies.append(f"Combustível crítico: {deuterium_pct:.1f}%")
-        
-        temp_gradient = plasma_temp - case_temp
-        if temp_gradient > limits['temp_gradient']:
-            anomalies.append(f"Gradiente térmico excessivo: {temp_gradient:.2e} K")
-        
-        return anomalies
-    
-    def get_real_time_analysis(self) -> Dict:
-        """Análise completa em tempo real"""
-        raw_data = self.fetch_raw_data()
-        if not raw_data:
-            return {'status': 'offline', 'error': 'No data available'}
-        
-        # Processa dados brutos
-        reactor_processed = self.process_reactor_data(raw_data.get('reactor', {}))
-        turbine_processed = self.process_turbine_data(raw_data.get('turbine', {}))
-        
-        # Calcula métricas avançadas
-        efficiency = self.calculate_efficiency_metrics(reactor_processed, turbine_processed)
-        anomalies = self.detect_anomalies(reactor_processed, turbine_processed)
-        
-        # Resultado final
-        analysis_result = {
-            'timestamp': datetime.now(),
-            'status': 'CRITICAL' if anomalies else 'NORMAL',
-            'reactor': reactor_processed,
-            'turbine': turbine_processed,
-            'efficiency': efficiency,
-            'anomalies': anomalies
-        }
-        
-        # Armazena no histórico
-        self.data_history.append(analysis_result)
-        
-        return analysis_result
+            if message_type == "dados_reator":
+                # Armazena dados do reator
+                self.reactor_data = data.get("dados", {})
+                self.reactor_data["timestamp"] = datetime.now().isoformat()
+                
+                print(f"📊 Dados do reator recebidos: {len(self.reactor_data)} campos")
+                
+                # Atualiza JSON
+                await self.update_json_file()
+                
+                # Confirma recebimento
+                await websocket.send(json.dumps({
+                    "tipo": "confirmacao",
+                    "status": "dados_reator_recebidos",
+                    "timestamp": time.time()
+                }))
+                
+            elif message_type == "dados_turbina":
+                # Armazena dados da turbina
+                self.turbine_data = data.get("dados", {})
+                self.turbine_data["timestamp"] = datetime.now().isoformat()
+                
+                print(f"📈 Dados da turbina recebidos: {len(self.turbine_data)} campos")
+                
+                # Atualiza JSON
+                await self.update_json_file()
+                
+                # Confirma recebimento
+                await websocket.send(json.dumps({
+                    "tipo": "confirmacao", 
+                    "status": "dados_turbina_recebidos",
+                    "timestamp": time.time()
+                }))
+                
+            elif message_type == "solicitar_dados_brutos":
+                # Envia dados brutos para o cliente
+                dados_brutos = {
+                    "reator": self.reactor_data,
+                    "turbina": self.turbine_data,
+                    "timestamp": datetime.now().isoformat()
+                }
+                await websocket.send(json.dumps({
+                    "tipo": "dados_brutos",
+                    "dados": dados_brutos,
+                    "timestamp": time.time()
+                }))
+                
+            elif message_type == "ping":
+                # Responde ping
+                await websocket.send(json.dumps({
+                    "tipo": "pong",
+                    "timestamp": data.get("timestamp")
+                }))
+                
+        except json.JSONDecodeError:
+            print(f"📨 Mensagem não-JSON recebida: {message}")
+            await websocket.send(json.dumps({
+                "tipo": "erro",
+                "mensagem": "Formato JSON inválido"
+            }))
+        except Exception as e:
+            print(f"❌ Erro ao processar mensagem: {e}")
 
-# Teste simples
+async def main():
+    server = FusionServer()
+    
+    print("🚀 SERVIDOR FUSION INICIADO")
+    print("📡 Aguardando conexões WebSocket na porta 8765")
+    print("💾 Dados brutos salvos em: fusion_data.json")
+    print("💡 ComputerCraft deve conectar como cliente")
+    print("-" * 50)
+    
+    # Inicia o servidor WebSocket
+    async with websockets.serve(server.handle_client, "0.0.0.0", 8765):
+        print("✅ Servidor WebSocket rodando!")
+        await asyncio.Future()  # Executa indefinidamente
+
 if __name__ == "__main__":
-    analyzer = ReactorDataProcessor()
-    
-    print("Testando Fusion Analyzer...")
-    analysis = analyzer.get_real_time_analysis()
-    
-    if analysis['status'] != 'offline':
-        print("✅ Analyzer funcionando!")
-        print(f"Status: {analysis['status']}")
-        print(f"Temperatura: {analysis['reactor']['temperatures']['plasma']['megakelvin']:.1f} MK")
-        print(f"Potência: {analysis['turbine']['power']['power_watts']/1000:.1f} kW")
-    else:
-        print("❌ Analyzer offline - verifique o script Lua")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Servidor parado pelo usuário")
+    except Exception as e:
+        print(f"❌ Erro no servidor: {e}")
